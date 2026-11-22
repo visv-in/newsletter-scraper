@@ -9,25 +9,34 @@ type CategoryId =
   | "postgres"
   | "python"
   | "ai";
-type NewsletterSource =
-  | "therundownai"
-  | "tldrai"
-  | "thebatch"
-  | "superhumanai"
-  | "importai";
 type DomainTopicId = "html" | "css" | "js" | "postgres" | "python" | "ai";
-type SelectedCategory = CategoryId | NewsletterSource | "all";
+type SelectedCategory = CategoryId | "all";
 
 interface FeedItem {
   description: string;
   source: string;
   date: string;
   url: string;
+  issueUrl?: string;
+}
+
+interface NewsletterIssue {
+  source: string;
+  date: string;
+  url: string;
+}
+
+interface NewsletterSelection {
+  source: string;
+  issueUrl?: string;
+  date?: string;
 }
 
 interface CategorizedFeedItem extends FeedItem {
   categories: CategoryId[];
 }
+
+const SCRAPE_START_DATE = "2026-01-01";
 
 const CATEGORIES: Array<{
   id: CategoryId;
@@ -58,7 +67,6 @@ const CATEGORIES: Array<{
       /\bjavascript\b/i,
       /\btypescript\b/i,
       /\bjs\b/i,
-      /\breact\b/i,
       /\bvue\b/i,
       /\bsvelte\b/i,
       /\bangular\b/i,
@@ -116,14 +124,31 @@ const CATEGORIES: Array<{
   },
 ];
 
-const AI_SOURCES: Array<{ id: NewsletterSource; label: string }> = [
-  { id: "therundownai", label: "The Rundown AI" },
-  { id: "tldrai", label: "TLDR AI" },
-  { id: "thebatch", label: "The Batch" },
-  { id: "superhumanai", label: "Superhuman AI" },
-  { id: "importai", label: "Import AI" },
+const AI_NEWSLETTERS = [
+  {
+    id: "therundownai",
+    label: "The Rundown AI",
+    url: "https://www.therundown.ai/",
+  },
+  { id: "tldrai", label: "TLDR AI", url: "https://tldr.tech/ai" },
+  {
+    id: "thebatch",
+    label: "The Batch",
+    url: "https://www.deeplearning.ai/the-batch/",
+  },
+  {
+    id: "superhumanai",
+    label: "Superhuman AI",
+    url: "https://www.superhuman.ai/",
+  },
+  {
+    id: "importai",
+    label: "Import AI",
+    url: "https://importai.substack.com/",
+  },
 ];
-const AI_SOURCE_IDS = new Set<string>(AI_SOURCES.map(({ id }) => id));
+const AI_SOURCE_IDS = new Set<string>(AI_NEWSLETTERS.map(({ id }) => id));
+const OTHER_NEWSLETTERS = AI_NEWSLETTERS;
 function isDomainTopicCategory(
   category: (typeof CATEGORIES)[number],
 ): category is (typeof CATEGORIES)[number] & { id: DomainTopicId } {
@@ -152,6 +177,20 @@ function isFeedItem(value: unknown): value is FeedItem {
     "date" in value &&
     typeof value.date === "string" &&
     "url" in value &&
+    typeof value.url === "string" &&
+    (!("issueUrl" in value) || typeof value.issueUrl === "string")
+  );
+}
+
+function isNewsletterIssue(value: unknown): value is NewsletterIssue {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "source" in value &&
+    typeof value.source === "string" &&
+    "date" in value &&
+    typeof value.date === "string" &&
+    "url" in value &&
     typeof value.url === "string"
   );
 }
@@ -161,14 +200,34 @@ function classifyItem(item: FeedItem): CategoryId[] {
   return CATEGORIES.filter(
     ({ id, matches }) =>
       (id === "ai" && AI_SOURCE_IDS.has(item.source)) ||
+      (id === "python" && item.source === "pycoders") ||
       matches.some((pattern) => pattern.test(text)),
   ).map(({ id }) => id);
 }
 
-function isNewsletterSource(
-  selection: SelectedCategory,
-): selection is NewsletterSource {
-  return AI_SOURCE_IDS.has(selection);
+function getLinkIdentity(url: string) {
+  try {
+    const normalized = new URL(url);
+    normalized.hash = "";
+
+    for (const key of [...normalized.searchParams.keys()]) {
+      if (
+        key.toLowerCase().startsWith("utm_") ||
+        ["fbclid", "gclid", "mc_cid", "mc_eid"].includes(key.toLowerCase())
+      ) {
+        normalized.searchParams.delete(key);
+      }
+    }
+
+    normalized.searchParams.sort();
+    if (normalized.pathname !== "/") {
+      normalized.pathname = normalized.pathname.replace(/\/+$/, "");
+    }
+
+    return normalized.toString();
+  } catch {
+    return url.trim();
+  }
 }
 
 function matchesSelection(
@@ -176,9 +235,7 @@ function matchesSelection(
   selection: SelectedCategory,
 ) {
   if (selection === "all") return true;
-  return isNewsletterSource(selection)
-    ? item.source === selection
-    : item.categories.includes(selection);
+  return item.categories.includes(selection);
 }
 
 async function loadFeed(): Promise<CategorizedFeedItem[]> {
@@ -195,20 +252,61 @@ async function loadFeed(): Promise<CategorizedFeedItem[]> {
     throw new Error("The curated links data has an invalid format.");
   }
 
-  return data.map((item: unknown, index: number) => {
-    if (!isFeedItem(item)) {
-      throw new Error(`The curated links data has an invalid item at ${index}.`);
-    }
+  const feedItems = data
+    .map((item: unknown, index: number) => {
+      if (!isFeedItem(item)) {
+        throw new Error(
+          `The curated links data has an invalid item at ${index}.`,
+        );
+      }
 
-    return { ...item, categories: classifyItem(item) };
+      return { ...item, categories: classifyItem(item) };
+    })
+    .filter((item) => item.date >= SCRAPE_START_DATE)
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const seenLinks = new Set<string>();
+
+  return feedItems.filter((item) => {
+    const identity = getLinkIdentity(item.url);
+    if (seenLinks.has(identity)) return false;
+    seenLinks.add(identity);
+    return true;
   });
+}
+
+async function loadNewsletterIssues(): Promise<NewsletterIssue[]> {
+  const response = await fetch(new URL("issues.json", window.location.href), {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Could not load newsletter issues (HTTP ${response.status}).`,
+    );
+  }
+
+  const data: unknown = await response.json();
+  if (!Array.isArray(data)) {
+    throw new Error("The newsletter issues data has an invalid format.");
+  }
+
+  return data
+    .map((issue: unknown, index: number) => {
+      if (!isNewsletterIssue(issue)) {
+        throw new Error(
+          `The newsletter issues data has an invalid item at ${index}.`,
+        );
+      }
+
+      return issue;
+    })
+    .filter((issue) => issue.date >= SCRAPE_START_DATE);
 }
 
 function getHostname(url: string) {
   try {
     const parsedUrl = new URL(url);
     if (!["http:", "https:"].includes(parsedUrl.protocol)) return null;
-    return parsedUrl.hostname.toLowerCase();
+    return parsedUrl.hostname.toLowerCase().replace(/^www\./, "");
   } catch {
     return null;
   }
@@ -227,9 +325,9 @@ function formatDate(date: string) {
 
 function formatSource(source: string) {
   const names: Record<string, string> = {
-    frontendfocus: "Frontend Focus",
     javascriptweekly: "JavaScript Weekly",
     nodeweekly: "Node Weekly",
+    frontendfocus: "Frontend Focus",
     postgresweekly: "Postgres Weekly",
     pycoders: "PyCoders",
     therundownai: "The Rundown AI",
@@ -247,7 +345,11 @@ export function Feed() {
   const [selectedDomainTopic, setSelectedDomainTopic] =
     createSignal<DomainTopicId | null>(null);
   const [selectedDomain, setSelectedDomain] = createSignal<string | null>(null);
+  const [selectedNewsletter, setSelectedNewsletter] =
+    createSignal<NewsletterSelection | null>(null);
   const [items, { refetch }] = createResource(loadFeed);
+  const [newsletterIssues, { refetch: refetchNewsletterIssues }] =
+    createResource(loadNewsletterIssues);
 
   const sortedItems = createMemo(() =>
     [...(items() ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
@@ -256,6 +358,17 @@ export function Feed() {
     const domain = selectedDomain();
     if (domain) {
       return sortedItems().filter((item) => getHostname(item.url) === domain);
+    }
+
+    const newsletter = selectedNewsletter();
+    if (newsletter) {
+      return sortedItems().filter((item) => {
+        if (item.source !== newsletter.source) return false;
+        if (!newsletter.issueUrl) return true;
+        return item.issueUrl
+          ? item.issueUrl === newsletter.issueUrl
+          : item.date === newsletter.date;
+      });
     }
 
     const category = selectedCategory();
@@ -286,16 +399,28 @@ export function Feed() {
     setSelectedCategory(category);
     setSelectedDomainTopic(null);
     setSelectedDomain(null);
+    setSelectedNewsletter(null);
   };
   const selectDomainTopic = (topic: DomainTopicId) => {
     setSelectedCategory("all");
     setSelectedDomainTopic(topic);
     setSelectedDomain(null);
+    setSelectedNewsletter(null);
   };
   const selectDomain = (domain: string) => {
     setSelectedCategory("all");
     setSelectedDomainTopic(null);
     setSelectedDomain(domain);
+    setSelectedNewsletter(null);
+  };
+  const selectNewsletter = (source: string, issue?: NewsletterIssue) => {
+    setSelectedCategory("all");
+    setSelectedDomainTopic(null);
+    setSelectedDomain(null);
+    setSelectedNewsletter({
+      source,
+      ...(issue ? { issueUrl: issue.url, date: issue.date } : {}),
+    });
   };
   const heading = () => {
     const domain = selectedDomain();
@@ -304,11 +429,16 @@ export function Feed() {
     const topic = selectedDomainTopic();
     if (topic) return `${CATEGORY_LABELS.get(topic)} domains`;
 
+    const newsletter = selectedNewsletter();
+    if (newsletter) {
+      return newsletter.date
+        ? `${formatSource(newsletter.source)} · ${formatDate(newsletter.date)} links`
+        : `${formatSource(newsletter.source)} links`;
+    }
+
     const category = selectedCategory();
     if (category === "all") return "Latest links";
-    const label = isNewsletterSource(category)
-      ? formatSource(category)
-      : CATEGORY_LABELS.get(category);
+    const label = CATEGORY_LABELS.get(category);
     return `${label} links`;
   };
 
@@ -331,6 +461,14 @@ export function Feed() {
 
       <div class="container mx-auto flex min-h-0 flex-1">
         <aside class="hidden min-h-0 w-56 flex-none overflow-y-auto border-r border-border px-4 py-6 md:block">
+          <NewsletterNavigation
+            issues={newsletterIssues() ?? []}
+            loading={newsletterIssues.loading}
+            error={newsletterIssues.error}
+            onRetry={() => refetchNewsletterIssues()}
+            selected={selectedNewsletter}
+            onSelectNewsletter={selectNewsletter}
+          />
           <p class="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
             Browse topics
           </p>
@@ -344,16 +482,27 @@ export function Feed() {
             onSelect={selectDomainTopic}
             countFor={countForDomainTopic}
           />
+          <OtherNewsletterNavigation />
         </aside>
 
         <main class="flex min-w-0 flex-1 flex-col">
           <div class="border-b border-border px-4 py-3 md:hidden">
+            <NewsletterNavigation
+              compact
+              issues={newsletterIssues() ?? []}
+              loading={newsletterIssues.loading}
+              error={newsletterIssues.error}
+              onRetry={() => refetchNewsletterIssues()}
+              selected={selectedNewsletter}
+              onSelectNewsletter={selectNewsletter}
+            />
             <CategoryNavigation
               compact
               selected={selectedCategory}
               onSelect={selectCategory}
               countFor={countFor}
             />
+            <OtherNewsletterNavigation compact />
           </div>
 
           <div class="min-h-0 flex-1 overflow-y-auto">
@@ -402,7 +551,7 @@ export function Feed() {
                       when={visibleItems().length > 0}
                       fallback={
                         <p class="py-12 text-center text-fg-muted">
-                          No links in this topic yet.
+                          No links found for this selection yet.
                         </p>
                       }
                     >
@@ -431,6 +580,182 @@ export function Feed() {
   );
 }
 
+function NewsletterNavigation(props: {
+  compact?: boolean;
+  issues: NewsletterIssue[];
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+  selected: () => NewsletterSelection | null;
+  onSelectNewsletter: (source: string, issue?: NewsletterIssue) => void;
+}) {
+  const groupedIssues = createMemo(() => {
+    const groups = new Map<string, NewsletterIssue[]>();
+    for (const issue of props.issues.filter(
+      ({ source }) => !AI_SOURCE_IDS.has(source),
+    )) {
+      const group = groups.get(issue.source) ?? [];
+      group.push(issue);
+      groups.set(issue.source, group);
+    }
+
+    return [...groups.entries()].sort(([a], [b]) =>
+      formatSource(a).localeCompare(formatSource(b)),
+    );
+  });
+
+  return (
+    <section class={props.compact ? "mb-3" : "mb-6"}>
+      <Show
+        when={!props.compact}
+        fallback={
+          <details class="rounded-lg border border-border">
+            <summary class="cursor-pointer px-3 py-2 text-sm font-semibold">
+              From Newsletter
+            </summary>
+            <div class="max-h-64 overflow-y-auto px-2 pb-2">
+              <NewsletterIssueGroups
+                groups={groupedIssues()}
+                loading={props.loading}
+                error={props.error}
+                onRetry={props.onRetry}
+                selected={props.selected}
+                onSelectNewsletter={props.onSelectNewsletter}
+              />
+            </div>
+          </details>
+        }
+      >
+        <h2 class="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+          From Newsletter
+        </h2>
+        <NewsletterIssueGroups
+          groups={groupedIssues()}
+          loading={props.loading}
+          error={props.error}
+          onRetry={props.onRetry}
+          selected={props.selected}
+          onSelectNewsletter={props.onSelectNewsletter}
+        />
+      </Show>
+    </section>
+  );
+}
+
+function NewsletterIssueGroups(props: {
+  groups: [string, NewsletterIssue[]][];
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+  selected: () => NewsletterSelection | null;
+  onSelectNewsletter: (source: string, issue?: NewsletterIssue) => void;
+}) {
+  return (
+    <Show
+      when={!props.loading && !props.error}
+      fallback={
+        <Show
+          when={props.error}
+          fallback={
+            <p class="px-3 py-2 text-sm text-fg-subtle">Loading issues…</p>
+          }
+        >
+          <div class="px-3 py-2 text-sm text-fg-subtle" role="alert">
+            <p>
+              {props.error instanceof Error
+                ? props.error.message
+                : "Could not load newsletter issues."}
+            </p>
+            <button type="button" class="mt-1 text-link" onClick={props.onRetry}>
+              Try again
+            </button>
+          </div>
+        </Show>
+      }
+    >
+      <Show
+        when={props.groups.length > 0}
+        fallback={
+          <p class="px-3 py-2 text-sm text-fg-subtle">No issues found.</p>
+        }
+      >
+        <div class="flex flex-col gap-1">
+          <For each={props.groups}>
+            {([source, issues]) => (
+              <details class="rounded-lg">
+                <summary
+                  class={`cursor-pointer rounded-lg px-3 py-2 text-sm text-fg-muted hover:bg-surface ${props.selected()?.source === source ? "bg-surface font-semibold text-fg" : ""}`}
+                  onClick={() => props.onSelectNewsletter(source)}
+                >
+                  <span>{formatSource(source)}</span>
+                  <span class="ml-2 text-xs text-fg-subtle">
+                    {issues.length.toLocaleString()}
+                  </span>
+                </summary>
+                <ul class="ml-3 border-l border-border py-1 pl-2">
+                  <For each={issues}>
+                    {(issue) => (
+                      <li>
+                        <button
+                          type="button"
+                          aria-pressed={props.selected()?.issueUrl === issue.url}
+                          class="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs text-fg-muted hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+                          onClick={() =>
+                            props.onSelectNewsletter(source, issue)
+                          }
+                        >
+                          <time datetime={issue.date}>
+                            {formatDate(issue.date)}
+                          </time>
+                        </button>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </details>
+            )}
+          </For>
+        </div>
+      </Show>
+    </Show>
+  );
+}
+
+function OtherNewsletterNavigation(props: { compact?: boolean }) {
+  return (
+    <section
+      class={
+        props.compact
+          ? "mt-3 border-t border-border pt-3"
+          : "mt-6 border-t border-border pt-5"
+      }
+    >
+      <h2 class="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+        Other Newsletters
+      </h2>
+      <nav
+        aria-label="Other newsletters"
+        class={
+          props.compact ? "flex gap-2 overflow-x-auto" : "flex flex-col gap-1"
+        }
+      >
+        <For each={OTHER_NEWSLETTERS}>
+          {(source) => (
+            <a
+              href={source.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="flex-none rounded-lg px-3 py-2 text-sm text-fg-muted hover:bg-surface hover:text-fg"
+            >
+              {source.label}
+            </a>
+          )}
+        </For>
+      </nav>
+    </section>
+  );
+}
+
 function CategoryNavigation(props: {
   compact?: boolean;
   selected: () => SelectedCategory;
@@ -439,15 +764,7 @@ function CategoryNavigation(props: {
 }) {
   const options: Array<{ id: SelectedCategory; label: string }> = [
     { id: "all", label: "All links" },
-    ...CATEGORIES.flatMap(({ id, label }) => [
-      { id, label },
-      ...(id === "ai"
-        ? AI_SOURCES.map(({ id: sourceId, label: sourceLabel }) => ({
-            id: sourceId,
-            label: sourceLabel,
-          }))
-        : []),
-    ]),
+    ...CATEGORIES.map(({ id, label }) => ({ id, label })),
   ];
 
   return (
@@ -464,7 +781,7 @@ function CategoryNavigation(props: {
           <button
             type="button"
             aria-pressed={props.selected() === option.id}
-            class={`flex flex-none items-center justify-between gap-5 rounded-lg px-3 py-2 text-left text-sm transition-colors aria-pressed:bg-surface aria-pressed:font-semibold aria-pressed:text-fg text-fg-muted hover:bg-surface ${AI_SOURCE_IDS.has(option.id) ? "pl-5 md:ml-3" : ""}`}
+            class="flex flex-none items-center justify-between gap-5 rounded-lg px-3 py-2 text-left text-sm text-fg-muted transition-colors aria-pressed:bg-surface aria-pressed:font-semibold aria-pressed:text-fg hover:bg-surface"
             onClick={() => props.onSelect(option.id)}
           >
             <span>{option.label}</span>

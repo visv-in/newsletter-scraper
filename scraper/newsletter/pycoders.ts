@@ -60,17 +60,24 @@ export class PyCoders implements InfoExtractor {
     try {
       await page.goto(`${PyCoders.baseUrl}/issues`);
 
-      const issues = page.mainFrame.document.querySelectorAll(
-        '.container div h2 a[href^="/issues"]',
-      );
+      const issues = [
+        ...page.mainFrame.document.querySelectorAll('a[href^="/issues/"]'),
+      ]
+        .flatMap((issue) => {
+          const href = issue.getAttribute("href");
+          if (!href) return [];
 
-      for (const issue of issues) {
-        const url = (issue as HTMLAnchorElement).href;
-        if (!url) throw new Error("failed to extract url");
+          const url = new URL(href, `${PyCoders.baseUrl}/`).href;
+          if (!/^\/issues\/\d+\/?$/.test(new URL(url).pathname)) return [];
+
+          return [{ url, dateText: issue.textContent ?? "" }];
+        });
+
+      for (const { url, dateText } of issues) {
         if (this.db.isSaved(url)) continue;
 
         try {
-          const date = extractDate(issue?.textContent ?? "");
+          const date = extractDate(dateText);
           if (!isIssueDateEligible(date)) continue;
 
           await page.goto(url);
@@ -184,7 +191,9 @@ function extractDate(str: string) {
     .replace(/jan./i, "January")
     .replace(",", "");
 
-  const date = parse(dateStr, "MMMM dd yyyy", new Date(), { locale: enUS });
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+    ? new Date(`${dateStr}T00:00:00Z`)
+    : parse(dateStr, "MMMM dd yyyy", new Date(), { locale: enUS });
 
   if (!isValid(date)) throw new Error("failed to parse date");
   const dateFmt = formatISO(date, { representation: "date" });

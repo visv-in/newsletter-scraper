@@ -14,17 +14,11 @@ interface CategoryEnum<T = string> {
 
 export type SourceName =
   | "javascriptweekly"
-  | "golangweekly"
   | "nodeweekly"
   | "frontendfocus"
-  | "rubyweekly"
   | "postgresweekly"
   | "pycoders"
-  | "therundownai"
-  | "tldrai"
-  | "thebatch"
-  | "superhumanai"
-  | "importai";
+  | "tldrai";
 type Source = CategoryEnum<SourceName>;
 
 export type StatusName = "success" | "error";
@@ -44,6 +38,12 @@ export interface Info {
   source: SourceName;
   date: string;
   data: string;
+}
+
+interface ExportIssue {
+  url: string;
+  source: SourceName;
+  date: string;
 }
 
 export class Storage extends SQLite {
@@ -69,17 +69,11 @@ export class Storage extends SQLite {
       INSERT OR IGNORE INTO source (name)
       VALUES
       ('javascriptweekly'),
-      ('golangweekly'),
       ('nodeweekly'),
       ('frontendfocus'),
-      ('rubyweekly'),
       ('postgresweekly'),
       ('pycoders'),
-      ('therundownai'),
-      ('tldrai'),
-      ('thebatch'),
-      ('superhumanai'),
-      ('importai');
+      ('tldrai');
 
       CREATE TABLE IF NOT EXISTS newsletter (
         id INTEGER PRIMARY KEY,
@@ -93,6 +87,8 @@ export class Storage extends SQLite {
       );
       `);
 
+    this.cleanScrapedContent();
+
     const statusList = this.prepare("SELECT * from status").all() as Status[];
     this.status = new Map<StatusName, number>();
     for (const it of statusList) this.status.set(it.name, it.id);
@@ -100,8 +96,6 @@ export class Storage extends SQLite {
     const sourceList = this.prepare("SELECT * from source").all() as Source[];
     this.source = new Map<SourceName, number>();
     for (const it of sourceList) this.source.set(it.name, it.id);
-
-    this.cleanScrapedContent();
   }
 
   isSaved(url?: string) {
@@ -223,6 +217,20 @@ export class Storage extends SQLite {
         `,
     ).all(SCRAPE_START_DATE) as Info[];
 
+    const issues = this.prepare(
+      `SELECT
+        n.url AS url,
+        source.name AS source,
+        n.date AS date
+      FROM newsletter n
+      LEFT JOIN status ON status.id = n.status_id
+      LEFT JOIN source ON source.id = n.source_id
+      WHERE status.name = 'success'
+        AND n.date >= ?
+      ORDER BY n.date DESC, source.name ASC, n.id DESC
+        `,
+    ).all(SCRAPE_START_DATE) as ExportIssue[];
+
     let uniqueCounter = 0;
     let repeatedCounter = 0;
     const finalData = [];
@@ -244,6 +252,7 @@ export class Storage extends SQLite {
         finalData.push({
           id: uniqueCounter++,
           url: issue.link,
+          issueUrl: row.url,
           description: issue.description,
           source: row.source,
           date: row.date,
@@ -251,14 +260,12 @@ export class Storage extends SQLite {
       }
     }
 
-    try {
-      await writeFile("../app/public/data.json", JSON.stringify(finalData));
+    await writeFile("../app/public/data.json", JSON.stringify(finalData));
+    await writeFile("../app/public/issues.json", JSON.stringify(issues));
 
-      console.log(`exported ${finalData.length} items`);
-      console.log(`skipped ${repeatedCounter} items`);
-    } catch (err) {
-      console.log(err);
-    }
+    console.log(`exported ${finalData.length} items`);
+    console.log(`exported ${issues.length} newsletter issues`);
+    console.log(`skipped ${repeatedCounter} items`);
   }
 
   private cleanScrapedContent() {
@@ -326,7 +333,11 @@ export class Storage extends SQLite {
         removedLinks += duplicateCount;
       }
 
-      return { removedIssues, normalizedIssues, removedLinks };
+      return {
+        removedIssues,
+        normalizedIssues,
+        removedLinks,
+      };
     });
     const result = cleanup();
 

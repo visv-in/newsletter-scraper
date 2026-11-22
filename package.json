@@ -1,7 +1,7 @@
 {
   "name": "newslatter-scrapper",
   "scripts": {
-    "scrape": "pnpm --filter scraper update",
+    "scrape": "pnpm --filter scraper run update",
     "web": "pnpm run --filter app dev",
     "fmt": "biome format --write",
     "check": "biome check"

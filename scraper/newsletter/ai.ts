@@ -10,10 +10,7 @@ import type { InfoContent } from "./common/helper.ts";
 import type { InfoExtractor } from "./interface.ts";
 
 interface NewsletterConfig {
-  source: Extract<
-    SourceName,
-    "therundownai" | "tldrai" | "thebatch" | "superhumanai" | "importai"
-  >;
+  source: Extract<SourceName, "tldrai">;
   baseUrl: string;
   archiveUrl: string;
   issuePath: RegExp;
@@ -21,34 +18,10 @@ interface NewsletterConfig {
 
 export const AI_NEWSLETTERS: NewsletterConfig[] = [
   {
-    source: "therundownai",
-    baseUrl: "https://www.therundown.ai",
-    archiveUrl: "https://www.therundown.ai/articles",
-    issuePath: /^\/articles\/[^/]+$/,
-  },
-  {
     source: "tldrai",
     baseUrl: "https://tldr.tech",
     archiveUrl: "https://tldr.tech/ai/archives",
     issuePath: /^\/ai\/20\d{2}-\d{2}-\d{2}$/,
-  },
-  {
-    source: "thebatch",
-    baseUrl: "https://www.deeplearning.ai",
-    archiveUrl: "https://www.deeplearning.ai/the-batch/",
-    issuePath: /^\/the-batch\/.+/,
-  },
-  {
-    source: "superhumanai",
-    baseUrl: "https://www.superhuman.ai",
-    archiveUrl: "https://www.superhuman.ai/archive",
-    issuePath: /^\/p\/[^/]+$/,
-  },
-  {
-    source: "importai",
-    baseUrl: "https://importai.substack.com",
-    archiveUrl: "https://importai.substack.com/archive",
-    issuePath: /^\/p\/[^/]+$/,
   },
 ];
 
