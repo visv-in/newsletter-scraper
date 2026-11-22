@@ -1,6 +1,10 @@
 import type { Browser } from "happy-dom";
 import type { SourceName, Storage } from "../../database.ts";
 import type { InfoExtractor } from "../interface.ts";
+import {
+  isIssueDateEligible,
+  SCRAPE_START_DATE,
+} from "../../utils.ts";
 import { extractContent, extractContentDate } from "./helper.ts";
 
 class CommonExtractor implements InfoExtractor {
@@ -29,6 +33,11 @@ class CommonExtractor implements InfoExtractor {
       throw new Error(`URL does not exist on database: ${url}`);
     }
 
+    if (!isIssueDateEligible(this.db.getIssue(url).date)) {
+      console.log(`skipping issue before ${SCRAPE_START_DATE}: ${url}`);
+      return;
+    }
+
     const page = this.browser.newPage();
     await page.goto(url);
 
@@ -55,10 +64,12 @@ class CommonExtractor implements InfoExtractor {
       if (!url || this.db.isSaved(url)) continue;
 
       try {
+        const date = extractContentDate(issue.textContent);
+        if (!isIssueDateEligible(date)) continue;
+
         await page.goto(url);
         console.log(`parsing: ${url}`);
 
-        const date = extractContentDate(issue.textContent);
         const content = await extractContent(page, this.baseURL);
         this.db.saveContent(this.source, {
           url,
@@ -84,9 +95,6 @@ export const JavascriptWeekly = (browser: Browser, db: Storage) =>
 
 export const NodeWeekly = (browser: Browser, db: Storage) =>
   new CommonExtractor("nodeweekly", "https://nodeweekly.com", browser, db);
-
-export const RubyWeekly = (browser: Browser, db: Storage) =>
-  new CommonExtractor("rubyweekly", "https://rubyweekly.com", browser, db);
 
 export const PostgresWeekly = (browser: Browser, db: Storage) =>
   new CommonExtractor(

@@ -1,5 +1,11 @@
 import { writeFile } from "node:fs/promises";
 import SQLite from "better-sqlite3";
+import {
+  deduplicateLinks,
+  isExportableLink,
+  normalizeUrl,
+  SCRAPE_START_DATE,
+} from "./utils.ts";
 
 interface CategoryEnum<T = string> {
   id: number;
@@ -90,36 +96,55 @@ export class Storage extends SQLite {
     const sourceList = this.prepare("SELECT * from source").all() as Source[];
     this.source = new Map<SourceName, number>();
     for (const it of sourceList) this.source.set(it.name, it.id);
+
+    this.cleanScrapedContent();
   }
 
   isSaved(url?: string) {
+    if (!url) return false;
+
     const result = this.prepare("SELECT id FROM newsletter WHERE url = ?").get(
-      url,
+      normalizeUrl(url),
     );
 
     return result;
   }
 
   saveContent(source: SourceName, { date, url, content }: Content) {
-    const stmt =
-      this.prepare(`INSERT INTO newsletter (status_id, source_id, url, date, content)
-      VALUES (@status_id, @source_id, @url, @date, @content)`);
+    const uniqueContent = Array.isArray(content)
+      ? deduplicateLinks(content)
+      : content;
+    const stmt = this.prepare(`
+      INSERT INTO newsletter (status_id, source_id, url, date, content)
+      VALUES (@status_id, @source_id, @url, @date, @content)
+      ON CONFLICT(url) DO NOTHING
+    `);
 
-    const hasContent = Array.isArray(content) && content.length > 0;
+    const hasContent =
+      Array.isArray(uniqueContent) && uniqueContent.length > 0;
     const status_id = hasContent
       ? this.status.get("success")
       : this.status.get("error");
 
-    stmt.run({
-      url,
+    const result = stmt.run({
+      url: normalizeUrl(url),
       date,
       status_id,
       source_id: this.source.get(source),
-      content: JSON.stringify(content),
+      content: JSON.stringify(uniqueContent),
     });
+
+    if (result.changes === 0) {
+      console.log(`skipped already saved issue: ${normalizeUrl(url)}`);
+    } else {
+      this.cleanScrapedContent();
+    }
   }
 
   updateUrl(url: string, content: unknown[] | null) {
+    const uniqueContent = Array.isArray(content)
+      ? deduplicateLinks(content)
+      : content;
     const stmt = this.prepare(`
       UPDATE newsletter
       SET
@@ -127,12 +152,19 @@ export class Storage extends SQLite {
         status_id = @status_id
       WHERE url = @url`);
 
-    const hasContent = Array.isArray(content) && content.length > 0;
+    const hasContent =
+      Array.isArray(uniqueContent) && uniqueContent.length > 0;
     const status_id = hasContent
       ? this.status.get("success")
       : this.status.get("error");
 
-    stmt.run({ url, content: JSON.stringify(content), status_id });
+    const result = stmt.run({
+      url: normalizeUrl(url),
+      content: JSON.stringify(uniqueContent),
+      status_id,
+    });
+
+    if (result.changes > 0) this.cleanScrapedContent();
   }
 
   getIssue(url: string) {
@@ -150,7 +182,7 @@ export class Storage extends SQLite {
       `,
     );
 
-    return stmt.get(url) as Info;
+    return stmt.get(normalizeUrl(url)) as Info;
   }
 
   summary() {
@@ -182,9 +214,10 @@ export class Storage extends SQLite {
       LEFT JOIN status ON status.id = n.status_id
       LEFT JOIN source ON source.id = n.source_id
       WHERE status.name = 'success'
+        AND n.date >= ?
       ORDER BY n.date DESC
         `,
-    ).all() as Info[];
+    ).all(SCRAPE_START_DATE) as Info[];
 
     let uniqueCounter = 0;
     let repeatedCounter = 0;
@@ -196,12 +229,13 @@ export class Storage extends SQLite {
 
       for (const issue of issues) {
         if (!issue.link || !issue.description || issue.isSponsored) continue;
-        if (urls.has(issue.link)) {
+        const normalizedLink = normalizeUrl(issue.link);
+        if (urls.has(normalizedLink)) {
           repeatedCounter++;
           continue;
         }
 
-        urls.add(issue.link);
+        urls.add(normalizedLink);
 
         finalData.push({
           id: uniqueCounter++,
@@ -220,6 +254,88 @@ export class Storage extends SQLite {
       console.log(`skipped ${repeatedCounter} items`);
     } catch (err) {
       console.log(err);
+    }
+  }
+
+  private cleanScrapedContent() {
+    const cleanup = this.transaction(() => {
+      const removedIssues = this.prepare(
+        "DELETE FROM newsletter WHERE date < ?",
+      ).run(SCRAPE_START_DATE).changes;
+
+      const rows = this.prepare(
+        "SELECT id, url, content FROM newsletter ORDER BY date DESC, id DESC",
+      ).all() as Array<{ id: number; url: string; content: string | null }>;
+      const issueUrls = new Set<string>();
+      const updateUrl = this.prepare(
+        "UPDATE newsletter SET url = ? WHERE id = ?",
+      );
+      const updateContent = this.prepare(
+        "UPDATE newsletter SET content = ? WHERE id = ?",
+      );
+      const seenLinks = new Set<string>();
+      const preferredLinks = new Set<string>();
+      const contents = new Map<number, unknown[]>();
+      let normalizedIssues = 0;
+      let removedLinks = 0;
+
+      for (const row of rows) {
+        const normalizedUrl = normalizeUrl(row.url);
+        if (issueUrls.has(normalizedUrl)) {
+          throw new Error(
+            `Issue URLs collide after normalization: ${normalizedUrl}`,
+          );
+        }
+        issueUrls.add(normalizedUrl);
+
+        if (normalizedUrl !== row.url) {
+          updateUrl.run(normalizedUrl, row.id);
+          normalizedIssues++;
+        }
+
+        if (row.content === null) continue;
+
+        const content: unknown = JSON.parse(row.content);
+        if (!Array.isArray(content)) continue;
+
+        contents.set(row.id, content);
+        for (const item of content) {
+          if (isExportableLink(item)) {
+            preferredLinks.add(normalizeUrl(item.link));
+          }
+        }
+      }
+
+      for (const row of rows) {
+        const content = contents.get(row.id);
+        if (!content) continue;
+
+        const uniqueContent = deduplicateLinks(
+          content,
+          seenLinks,
+          preferredLinks,
+        );
+        const duplicateCount = content.length - uniqueContent.length;
+        if (duplicateCount === 0) continue;
+
+        updateContent.run(JSON.stringify(uniqueContent), row.id);
+        removedLinks += duplicateCount;
+      }
+
+      return { removedIssues, normalizedIssues, removedLinks };
+    });
+    const result = cleanup();
+
+    if (result.removedIssues > 0) {
+      console.log(
+        `removed ${result.removedIssues} issues before ${SCRAPE_START_DATE}`,
+      );
+    }
+    if (result.normalizedIssues > 0) {
+      console.log(`normalized ${result.normalizedIssues} issue URLs`);
+    }
+    if (result.removedLinks > 0) {
+      console.log(`removed ${result.removedLinks} duplicate scraped links`);
     }
   }
 }

@@ -1,7 +1,7 @@
 ---
 import "../styles/global.css";
 
-import { Search } from "../components/search";
+import { Feed } from "../components/feed";
 ---
 
 <html lang="en">
@@ -18,7 +18,7 @@ import { Search } from "../components/search";
     <title>Newsletter Scraper</title>
   </head>
   <body class="h-dvh flex flex-col">
-    <Search client:only="solid-js" />
+    <Feed client:only="solid-js" />
 
     <footer
       class="flex-none flex items-center p-3 justify-center border-t border-border text-fg-muted"

@@ -8,7 +8,12 @@ import type {
 } from "happy-dom";
 
 import type { Storage } from "../database.ts";
-import { defined, resolveUrl } from "../utils.ts";
+import {
+  defined,
+  isIssueDateEligible,
+  resolveUrl,
+  SCRAPE_START_DATE,
+} from "../utils.ts";
 import type { InfoContent } from "./common/helper.ts";
 import type { InfoExtractor } from "./interface.ts";
 
@@ -31,6 +36,11 @@ export class PyCoders implements InfoExtractor {
       throw new Error(`URL does not exist on database: ${url}`);
     }
 
+    if (!isIssueDateEligible(this.db.getIssue(url).date)) {
+      console.log(`skipping issue before ${SCRAPE_START_DATE}: ${url}`);
+      return;
+    }
+
     const page = this.browser.newPage();
     await page.goto(url);
 
@@ -47,38 +57,37 @@ export class PyCoders implements InfoExtractor {
   async update() {
     const page = this.browser.newPage();
 
-    await page.goto(`${PyCoders.baseUrl}/issues`);
+    try {
+      await page.goto(`${PyCoders.baseUrl}/issues`);
 
-    const issues = page.mainFrame.document.querySelectorAll(
-      '.container div h2 a[href^="/issues"]',
-    );
+      const issues = page.mainFrame.document.querySelectorAll(
+        '.container div h2 a[href^="/issues"]',
+      );
 
-    for (const issue of issues) {
-      const url = (issue as HTMLAnchorElement).href;
-      if (!url) throw new Error("failed to extract url");
-      if (!url || this.db.isSaved(url)) continue;
+      for (const issue of issues) {
+        const url = (issue as HTMLAnchorElement).href;
+        if (!url) throw new Error("failed to extract url");
+        if (this.db.isSaved(url)) continue;
 
-      const issueNumber = Number(url.split("/").at(-1));
-      // skip everything from "Issue #402 (Jan. 1, 2020)"
-      if (issueNumber < 402) break;
+        try {
+          const date = extractDate(issue?.textContent ?? "");
+          if (!isIssueDateEligible(date)) continue;
 
-      try {
-        await page.goto(url);
-        console.log(`parsing: ${url}`);
+          await page.goto(url);
+          console.log(`parsing: ${url}`);
 
-        const textContent = issue?.textContent;
-        const date = extractDate(textContent);
-        const content = await extractContent(page);
-        this.db.saveContent("pycoders", {
-          url,
-          date,
-          content,
-        });
-      } catch (err) {
-        console.error(err);
-      } finally {
-        page.close();
+          const content = await extractContent(page);
+          this.db.saveContent("pycoders", {
+            url,
+            date,
+            content,
+          });
+        } catch (err) {
+          console.error(err);
+        }
       }
+    } finally {
+      await page.close();
     }
   }
 }

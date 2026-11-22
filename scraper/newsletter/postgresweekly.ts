@@ -2,7 +2,11 @@ import { formatISO, isValid, parse } from "date-fns";
 import { enUS } from "date-fns/locale";
 import type { Browser, Element } from "happy-dom";
 import type { Storage } from "../database.ts";
-import { defined } from "../utils.ts";
+import {
+  defined,
+  isIssueDateEligible,
+  SCRAPE_START_DATE,
+} from "../utils.ts";
 import { extractContent } from "./common/helper.ts";
 import type { InfoExtractor } from "./interface.ts";
 
@@ -23,6 +27,11 @@ export class PostgresWeekly implements InfoExtractor {
   async updateUrl(url: string): Promise<void> {
     if (!this.db.isSaved(url)) {
       throw new Error(`URL does not exist on database: ${url}`);
+    }
+
+    if (!isIssueDateEligible(this.db.getIssue(url).date)) {
+      console.log(`skipping issue before ${SCRAPE_START_DATE}: ${url}`);
+      return;
     }
 
     const page = this.browser.newPage();
@@ -51,10 +60,11 @@ export class PostgresWeekly implements InfoExtractor {
       if (!url || this.db.isSaved(url)) continue;
 
       try {
+        const date = extractContentDate(issue);
+        if (!isIssueDateEligible(date)) continue;
+
         await page.goto(url);
         console.log(`parsing: ${url}`);
-
-        const date = extractContentDate(issue);
 
         console.log(date);
 
@@ -84,6 +94,3 @@ function extractContentDate(el?: Element): string {
 
   return dateFmt;
 }
-
-// export const GolangWeekly = (browser: Browser, db: Storage) =>
-//   new GolangWeekly("golangweekly", "https://golangweekly.com", browser, db);
