@@ -1,8 +1,22 @@
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Logo } from "../ui/logo";
 
-type CategoryId = "html" | "css" | "js" | "node" | "postgres" | "python";
-type SelectedCategory = CategoryId | "all";
+type CategoryId =
+  | "html"
+  | "css"
+  | "js"
+  | "node"
+  | "postgres"
+  | "python"
+  | "ai";
+type NewsletterSource =
+  | "therundownai"
+  | "tldrai"
+  | "thebatch"
+  | "superhumanai"
+  | "importai";
+type DomainTopicId = "html" | "css" | "js" | "postgres" | "python" | "ai";
+type SelectedCategory = CategoryId | NewsletterSource | "all";
 
 interface FeedItem {
   description: string;
@@ -84,8 +98,39 @@ const CATEGORIES: Array<{
       /\bpandas\b/i,
     ],
   },
+  {
+    id: "ai",
+    label: "AI",
+    matches: [
+      /\bai\b/i,
+      /\bartificial intelligence\b/i,
+      /\bmachine learning\b/i,
+      /\bdeep learning\b/i,
+      /\bllm\b/i,
+      /\bneural network\b/i,
+      /\bopenai\b/i,
+      /\banthropic\b/i,
+      /\bgemini\b/i,
+      /\bchatgpt\b/i,
+    ],
+  },
 ];
 
+const AI_SOURCES: Array<{ id: NewsletterSource; label: string }> = [
+  { id: "therundownai", label: "The Rundown AI" },
+  { id: "tldrai", label: "TLDR AI" },
+  { id: "thebatch", label: "The Batch" },
+  { id: "superhumanai", label: "Superhuman AI" },
+  { id: "importai", label: "Import AI" },
+];
+const AI_SOURCE_IDS = new Set<string>(AI_SOURCES.map(({ id }) => id));
+function isDomainTopicCategory(
+  category: (typeof CATEGORIES)[number],
+): category is (typeof CATEGORIES)[number] & { id: DomainTopicId } {
+  return category.id !== "node";
+}
+
+const DOMAIN_TOPICS = CATEGORIES.filter(isDomainTopicCategory);
 const CATEGORY_LABELS = new Map(
   CATEGORIES.map(({ id, label }) => [id, label]),
 );
@@ -113,13 +158,34 @@ function isFeedItem(value: unknown): value is FeedItem {
 
 function classifyItem(item: FeedItem): CategoryId[] {
   const text = `${item.description} ${item.url}`;
-  return CATEGORIES.filter(({ matches }) =>
-    matches.some((pattern) => pattern.test(text)),
+  return CATEGORIES.filter(
+    ({ id, matches }) =>
+      (id === "ai" && AI_SOURCE_IDS.has(item.source)) ||
+      matches.some((pattern) => pattern.test(text)),
   ).map(({ id }) => id);
 }
 
+function isNewsletterSource(
+  selection: SelectedCategory,
+): selection is NewsletterSource {
+  return AI_SOURCE_IDS.has(selection);
+}
+
+function matchesSelection(
+  item: CategorizedFeedItem,
+  selection: SelectedCategory,
+) {
+  if (selection === "all") return true;
+  return isNewsletterSource(selection)
+    ? item.source === selection
+    : item.categories.includes(selection);
+}
+
 async function loadFeed(): Promise<CategorizedFeedItem[]> {
-  const response = await fetch(new URL("data.json", window.location.href));
+  const response = await fetch(
+    new URL("data.json", window.location.href),
+    { cache: "no-store" },
+  );
   if (!response.ok) {
     throw new Error(`Could not load curated links (HTTP ${response.status}).`);
   }
@@ -138,12 +204,18 @@ async function loadFeed(): Promise<CategorizedFeedItem[]> {
   });
 }
 
-function getDomain(url: string) {
+function getHostname(url: string) {
   try {
-    return new URL(url).hostname.replace(/^www\./, "");
+    const parsedUrl = new URL(url);
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) return null;
+    return parsedUrl.hostname.toLowerCase();
   } catch {
-    return url;
+    return null;
   }
+}
+
+function getDomain(url: string) {
+  return getHostname(url) ?? url;
 }
 
 function formatDate(date: string) {
@@ -160,6 +232,11 @@ function formatSource(source: string) {
     nodeweekly: "Node Weekly",
     postgresweekly: "Postgres Weekly",
     pycoders: "PyCoders",
+    therundownai: "The Rundown AI",
+    tldrai: "TLDR AI",
+    thebatch: "The Batch",
+    superhumanai: "Superhuman AI",
+    importai: "Import AI",
   };
   return names[source] ?? source;
 }
@@ -167,22 +244,73 @@ function formatSource(source: string) {
 export function Feed() {
   const [selectedCategory, setSelectedCategory] =
     createSignal<SelectedCategory>("all");
+  const [selectedDomainTopic, setSelectedDomainTopic] =
+    createSignal<DomainTopicId | null>(null);
+  const [selectedDomain, setSelectedDomain] = createSignal<string | null>(null);
   const [items, { refetch }] = createResource(loadFeed);
 
   const sortedItems = createMemo(() =>
     [...(items() ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
   );
   const visibleItems = createMemo(() => {
+    const domain = selectedDomain();
+    if (domain) {
+      return sortedItems().filter((item) => getHostname(item.url) === domain);
+    }
+
     const category = selectedCategory();
-    return category === "all"
-      ? sortedItems()
-      : sortedItems().filter((item) => item.categories.includes(category));
+    return sortedItems().filter((item) => matchesSelection(item, category));
   });
   const countFor = (category: SelectedCategory) =>
-    category === "all"
-      ? sortedItems().length
-      : sortedItems().filter((item) => item.categories.includes(category))
-          .length;
+    sortedItems().filter((item) => matchesSelection(item, category)).length;
+  const countForDomain = (domain: string) =>
+    sortedItems().filter((item) => getHostname(item.url) === domain).length;
+  const domainsForTopic = (topic: DomainTopicId) =>
+    [
+      ...new Set(
+        sortedItems()
+          .filter((item) => item.categories.includes(topic))
+          .map((item) => getHostname(item.url))
+          .filter((domain): domain is string => domain !== null),
+      ),
+    ].sort();
+  const countForDomainTopic = (topic: DomainTopicId) =>
+    domainsForTopic(topic).length;
+  const resultsCount = () => {
+    const topic = selectedDomainTopic();
+    return topic
+      ? `${countForDomainTopic(topic).toLocaleString()} unique domains`
+      : `${visibleItems().length.toLocaleString()} curated reads`;
+  };
+  const selectCategory = (category: SelectedCategory) => {
+    setSelectedCategory(category);
+    setSelectedDomainTopic(null);
+    setSelectedDomain(null);
+  };
+  const selectDomainTopic = (topic: DomainTopicId) => {
+    setSelectedCategory("all");
+    setSelectedDomainTopic(topic);
+    setSelectedDomain(null);
+  };
+  const selectDomain = (domain: string) => {
+    setSelectedCategory("all");
+    setSelectedDomainTopic(null);
+    setSelectedDomain(domain);
+  };
+  const heading = () => {
+    const domain = selectedDomain();
+    if (domain) return `${domain} links`;
+
+    const topic = selectedDomainTopic();
+    if (topic) return `${CATEGORY_LABELS.get(topic)} domains`;
+
+    const category = selectedCategory();
+    if (category === "all") return "Latest links";
+    const label = isNewsletterSource(category)
+      ? formatSource(category)
+      : CATEGORY_LABELS.get(category);
+    return `${label} links`;
+  };
 
   return (
     <div class="flex flex-1 min-h-0 flex-col">
@@ -202,14 +330,19 @@ export function Feed() {
       </header>
 
       <div class="container mx-auto flex min-h-0 flex-1">
-        <aside class="hidden w-56 flex-none border-r border-border px-4 py-6 md:block">
+        <aside class="hidden min-h-0 w-56 flex-none overflow-y-auto border-r border-border px-4 py-6 md:block">
           <p class="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
             Browse topics
           </p>
           <CategoryNavigation
             selected={selectedCategory}
-            onSelect={setSelectedCategory}
+            onSelect={selectCategory}
             countFor={countFor}
+          />
+          <DomainTopicNavigation
+            selected={selectedDomainTopic}
+            onSelect={selectDomainTopic}
+            countFor={countForDomainTopic}
           />
         </aside>
 
@@ -218,7 +351,7 @@ export function Feed() {
             <CategoryNavigation
               compact
               selected={selectedCategory}
-              onSelect={setSelectedCategory}
+              onSelect={selectCategory}
               countFor={countFor}
             />
           </div>
@@ -227,12 +360,10 @@ export function Feed() {
             <div class="mx-auto max-w-3xl px-4 py-6 sm:px-6">
               <div class="mb-5">
                 <h1 class="text-2xl font-bold tracking-tight">
-                  {selectedCategory() === "all"
-                    ? "Latest links"
-                    : `${CATEGORY_LABELS.get(selectedCategory() as CategoryId)} links`}
+                  {heading()}
                 </h1>
                 <p class="mt-1 text-sm text-fg-subtle">
-                  {visibleItems().length.toLocaleString()} curated reads
+                  {resultsCount()}
                 </p>
               </div>
 
@@ -265,18 +396,31 @@ export function Feed() {
 
               <Show when={!items.loading && !items.error}>
                 <Show
-                  when={visibleItems().length > 0}
+                  when={selectedDomainTopic()}
                   fallback={
-                    <p class="py-12 text-center text-fg-muted">
-                      No links in this topic yet.
-                    </p>
+                    <Show
+                      when={visibleItems().length > 0}
+                      fallback={
+                        <p class="py-12 text-center text-fg-muted">
+                          No links in this topic yet.
+                        </p>
+                      }
+                    >
+                      <div class="space-y-4">
+                        <For each={visibleItems()}>
+                          {(item) => <FeedCard item={item} />}
+                        </For>
+                      </div>
+                    </Show>
                   }
                 >
-                  <div class="space-y-4">
-                    <For each={visibleItems()}>
-                      {(item) => <FeedCard item={item} />}
-                    </For>
-                  </div>
+                  {(topic) => (
+                    <DomainList
+                      domains={domainsForTopic(topic())}
+                      onSelect={selectDomain}
+                      countFor={countForDomain}
+                    />
+                  )}
                 </Show>
               </Show>
             </div>
@@ -295,7 +439,15 @@ function CategoryNavigation(props: {
 }) {
   const options: Array<{ id: SelectedCategory; label: string }> = [
     { id: "all", label: "All links" },
-    ...CATEGORIES.map(({ id, label }) => ({ id, label })),
+    ...CATEGORIES.flatMap(({ id, label }) => [
+      { id, label },
+      ...(id === "ai"
+        ? AI_SOURCES.map(({ id: sourceId, label: sourceLabel }) => ({
+            id: sourceId,
+            label: sourceLabel,
+          }))
+        : []),
+    ]),
   ];
 
   return (
@@ -312,7 +464,7 @@ function CategoryNavigation(props: {
           <button
             type="button"
             aria-pressed={props.selected() === option.id}
-            class="flex flex-none items-center justify-between gap-5 rounded-lg px-3 py-2 text-left text-sm transition-colors aria-pressed:bg-surface aria-pressed:font-semibold aria-pressed:text-fg text-fg-muted hover:bg-surface"
+            class={`flex flex-none items-center justify-between gap-5 rounded-lg px-3 py-2 text-left text-sm transition-colors aria-pressed:bg-surface aria-pressed:font-semibold aria-pressed:text-fg text-fg-muted hover:bg-surface ${AI_SOURCE_IDS.has(option.id) ? "pl-5 md:ml-3" : ""}`}
             onClick={() => props.onSelect(option.id)}
           >
             <span>{option.label}</span>
@@ -323,6 +475,73 @@ function CategoryNavigation(props: {
         )}
       </For>
     </nav>
+  );
+}
+
+function DomainTopicNavigation(props: {
+  selected: () => DomainTopicId | null;
+  onSelect: (topic: DomainTopicId) => void;
+  countFor: (topic: DomainTopicId) => number;
+}) {
+  return (
+    <section class="mt-6 border-t border-border pt-5">
+      <h2 class="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+        Domains
+      </h2>
+      <div class="flex flex-col gap-3">
+        <For each={DOMAIN_TOPICS}>
+          {(topic) => {
+            return (
+              <button
+                type="button"
+                aria-pressed={props.selected() === topic.id}
+                class="flex items-center justify-between gap-5 rounded-lg px-3 py-2 text-left text-sm text-fg-muted transition-colors aria-pressed:bg-surface aria-pressed:font-semibold aria-pressed:text-fg hover:bg-surface"
+                onClick={() => props.onSelect(topic.id)}
+              >
+                <span>{topic.label}</span>
+                <span class="text-xs text-fg-subtle">
+                  {props.countFor(topic.id).toLocaleString()}
+                </span>
+              </button>
+            );
+          }}
+        </For>
+      </div>
+    </section>
+  );
+}
+
+function DomainList(props: {
+  domains: string[];
+  onSelect: (domain: string) => void;
+  countFor: (domain: string) => number;
+}) {
+  return (
+    <Show
+      when={props.domains.length > 0}
+      fallback={
+        <p class="py-12 text-center text-fg-muted">
+          No domains in this topic yet.
+        </p>
+      }
+    >
+      <div class="grid gap-3 sm:grid-cols-2">
+        <For each={props.domains}>
+          {(domain) => (
+            <button
+              type="button"
+              class="flex items-center justify-between gap-3 rounded-xl border border-border bg-canvas p-4 text-left transition-colors hover:bg-surface"
+              onClick={() => props.onSelect(domain)}
+            >
+              <span class="truncate font-medium">{domain}</span>
+              <span class="flex-none text-xs text-fg-subtle">
+                {props.countFor(domain).toLocaleString()} links
+              </span>
+            </button>
+          )}
+        </For>
+      </div>
+    </Show>
   );
 }
 
@@ -339,7 +558,9 @@ function FeedCard(props: { item: CategorizedFeedItem }) {
           class="flex size-10 flex-none items-center justify-center rounded-full bg-surface text-xs font-bold uppercase text-fg-muted"
           aria-hidden="true"
         >
-          {props.item.categories[0] ?? "↗"}
+          {props.item.categories[0]
+            ? CATEGORY_LABELS.get(props.item.categories[0])
+            : "↗"}
         </div>
         <div class="min-w-0 flex-1">
           <div class="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-subtle">

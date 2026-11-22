@@ -14,15 +14,17 @@ interface CategoryEnum<T = string> {
 
 export type SourceName =
   | "javascriptweekly"
-  | "reactstatus"
   | "golangweekly"
   | "nodeweekly"
   | "frontendfocus"
   | "rubyweekly"
   | "postgresweekly"
-  | "thisweekinreact"
   | "pycoders"
-  | "swiftnews";
+  | "therundownai"
+  | "tldrai"
+  | "thebatch"
+  | "superhumanai"
+  | "importai";
 type Source = CategoryEnum<SourceName>;
 
 export type StatusName = "success" | "error";
@@ -67,15 +69,17 @@ export class Storage extends SQLite {
       INSERT OR IGNORE INTO source (name)
       VALUES
       ('javascriptweekly'),
-      ('reactstatus'),
       ('golangweekly'),
       ('nodeweekly'),
       ('frontendfocus'),
       ('rubyweekly'),
       ('postgresweekly'),
-      ('thisweekinreact'),
       ('pycoders'),
-      ('swiftnews');
+      ('therundownai'),
+      ('tldrai'),
+      ('thebatch'),
+      ('superhumanai'),
+      ('importai');
 
       CREATE TABLE IF NOT EXISTS newsletter (
         id INTEGER PRIMARY KEY,

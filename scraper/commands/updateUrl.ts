@@ -2,6 +2,7 @@ import type { Browser } from "happy-dom";
 import type { Storage } from "../database.ts";
 import { JavascriptWeekly, NodeWeekly } from "../newsletter/common/index.ts";
 import { FrontendFocus } from "../newsletter/frontendfocus.ts";
+import { createAINewsletterExtractors } from "../newsletter/ai.ts";
 import type { InfoExtractor } from "../newsletter/interface";
 import { PostgresWeekly } from "../newsletter/postgresweekly.ts";
 import { PyCoders } from "../newsletter/pycoders.ts";
@@ -24,6 +25,13 @@ export async function updateUrl(
 
   if (PostgresWeekly.canHandle(url)) {
     extractor = new PostgresWeekly(browser, storage);
+  }
+
+  for (const aiExtractor of createAINewsletterExtractors(browser, storage)) {
+    if (aiExtractor.canHandle(url)) {
+      extractor = aiExtractor;
+      break;
+    }
   }
 
   const items = [JavascriptWeekly, NodeWeekly];

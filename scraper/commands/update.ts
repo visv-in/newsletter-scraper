@@ -2,11 +2,15 @@ import type { Browser } from "happy-dom";
 import type { Storage } from "../database.ts";
 import { JavascriptWeekly, NodeWeekly } from "../newsletter/common/index.ts";
 import { FrontendFocus } from "../newsletter/frontendfocus.ts";
+import { createAINewsletterExtractors } from "../newsletter/ai.ts";
 import { PostgresWeekly } from "../newsletter/postgresweekly.ts";
 import { PyCoders } from "../newsletter/pycoders.ts";
 
 export async function update(browser: Browser, storage: Storage) {
   const results = await Promise.allSettled([
+    ...createAINewsletterExtractors(browser, storage).map((extractor) =>
+      extractor.update(),
+    ),
     JavascriptWeekly(browser, storage).update(),
     NodeWeekly(browser, storage).update(),
     new PostgresWeekly(browser, storage).update(),

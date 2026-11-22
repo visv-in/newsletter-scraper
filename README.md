@@ -1,6 +1,6 @@
 # newsletter-scraper
 
-A web scraper that extract curated content from Programming/Coding newsletter, making it a great tool to search for new libraries, articles and tools.
+A web scraper that extracts curated content from programming and AI newsletters, making it easy to search for new libraries, articles, and tools.
 
 [Website](https://carlosqsilva.github.io/newsletter-scraper/)
 
@@ -9,6 +9,11 @@ A web scraper that extract curated content from Programming/Coding newsletter, m
 - [x] [Frontend Focus](https://frontendfoc.us)
 - [x] [Postgres Weekly](https://postgresweekly.com)
 - [x] [Pycoders Weekly](https://pycoders.com/)
+- [x] [The Rundown AI](https://www.therundown.ai/)
+- [x] [TLDR AI](https://tldr.tech/ai)
+- [x] [The Batch](https://www.deeplearning.ai/the-batch/)
+- [x] [Superhuman AI](https://www.superhuman.ai/)
+- [x] [Import AI](https://importai.substack.com/)
 
 Want to suggest a new newsletter? [Suggest Newsletter](https://github.com/carlosqsilva/newsletter-scraper/issues/new/choose)
 
