@@ -42,16 +42,18 @@ export class PyCoders implements InfoExtractor {
     }
 
     const page = this.browser.newPage();
-    await page.goto(url);
+    try {
+      await page.goto(url);
 
-    console.log(`parsing: ${url}`);
-    const content = await extractContent(page);
-
-    if (content.length) {
+      console.log(`parsing: ${url}`);
+      const content = await extractContent(page);
+      if (content.length === 0) {
+        throw new Error(`No links extracted from issue: ${url}`);
+      }
       this.db.updateUrl(url, content);
+    } finally {
+      await page.close();
     }
-
-    page.close();
   }
 
   async update() {
@@ -73,17 +75,28 @@ export class PyCoders implements InfoExtractor {
           return [{ url, dateText: issue.textContent ?? "" }];
         });
 
-      for (const { url, dateText } of issues) {
-        if (this.db.isSaved(url)) continue;
+      const issueByUrl = new Map(issues.map((issue) => [issue.url, issue]));
+      for (const url of this.db.getNewIssueUrls(
+        "pycoders",
+        issues.map(({ url }) => url),
+      )) {
+        const issue = issueByUrl.get(url);
+        if (!issue) throw new Error(`failed to find issue listing for ${url}`);
 
         try {
-          const date = extractDate(dateText);
-          if (!isIssueDateEligible(date)) continue;
+          const date = extractDate(issue.dateText);
+          if (!isIssueDateEligible(date)) {
+            this.db.markIssueNumberSeen("pycoders", url);
+            continue;
+          }
 
           await page.goto(url);
           console.log(`parsing: ${url}`);
 
           const content = await extractContent(page);
+          if (content.length === 0) {
+            throw new Error(`No links extracted from issue: ${url}`);
+          }
           this.db.saveContent("pycoders", {
             url,
             date,
@@ -91,7 +104,34 @@ export class PyCoders implements InfoExtractor {
           });
         } catch (err) {
           console.error(err);
+          throw err;
         }
+      }
+
+      const oldestIssueNumber = this.db.getOldestIssueNumber("pycoders");
+      for (
+        let issueNumber = (oldestIssueNumber ?? 1) - 1;
+        issueNumber > 0;
+        issueNumber--
+      ) {
+        const url = `${PyCoders.baseUrl}/issues/${issueNumber}`;
+        await page.goto(url);
+        const issueTitle = page.mainFrame.document.title;
+        if (!issueTitle.includes(`Issue #${issueNumber}`)) {
+          throw new Error(`Could not verify PyCoders issue page: ${url}`);
+        }
+
+        const date = extractDate(
+          page.mainFrame.document.body.textContent ?? "",
+        );
+        if (!isIssueDateEligible(date)) break;
+
+        console.log(`backfilling: ${url}`);
+        const content = await extractContent(page);
+        if (content.length === 0) {
+          throw new Error(`No links extracted from issue: ${url}`);
+        }
+        this.db.saveContent("pycoders", { url, date, content });
       }
     } finally {
       await page.close();
@@ -104,7 +144,7 @@ async function extractContent(page: BrowserPage) {
     "table tbody tr td > span,br",
   );
 
-  const promisesInfo = [] as Promise<InfoContent | null>[];
+  const promisesInfo = [] as Promise<InfoContent[]>[];
   let breakCount = 0;
   let currentInfo = [];
 
@@ -122,8 +162,7 @@ async function extractContent(page: BrowserPage) {
     }
   }
 
-  let infoList = await Promise.all(promisesInfo);
-  infoList = infoList.filter((it) => defined(it));
+  const infoList = (await Promise.all(promisesInfo)).flat();
   console.log(`extracted ${infoList.length} items`);
 
   return infoList;
@@ -131,69 +170,95 @@ async function extractContent(page: BrowserPage) {
 
 const sponsorRegex = /sponsor/i;
 const locationRegex = /📍/i;
-async function parseInfo(nodeList: Element[]): Promise<InfoContent | null> {
-  if (nodeList.length < 2) return null;
+async function parseInfo(nodeList: Element[]): Promise<InfoContent[]> {
+  if (nodeList.length < 2) return [];
   let nodes = nodeList;
 
   const lastItemContent = nodes.at(-1)?.textContent ?? "";
-
-  // skip sponsor content
-  if (sponsorRegex.test(lastItemContent)) return null;
+  const isSponsored = sponsorRegex.test(lastItemContent);
 
   // try to remove "Jobs link" if has location 📍
   if (locationRegex.test(lastItemContent)) {
-    return null;
+    return [];
   }
 
   if (nodes.length > 1) {
     nodes = nodes.slice(0, -1);
   }
 
-  const content = {} as InfoContent;
+  const description = nodes
+    .map((node) => node.textContent.trim())
+    .filter(Boolean)
+    .join(" - ");
+  if (!description) return [];
 
-  for (const ele of nodes) {
-    if (!content.link) {
-      content.link = (ele?.querySelector("a") as HTMLAnchorElement)?.href;
-    }
+  const links = [
+    ...new Set(
+      nodes.flatMap((node) =>
+        [...node.querySelectorAll("a[href]")].flatMap((anchor) => {
+          const href = anchor.getAttribute("href")?.trim();
+          if (!href || href.startsWith("#")) return [];
 
-    const textContent = ele.textContent;
+          try {
+            const url = new URL((anchor as HTMLAnchorElement).href);
+            return ["http:", "https:"].includes(url.protocol) && !url.hash
+              ? [url.href]
+              : [];
+          } catch {
+            return [];
+          }
+        }),
+      ),
+    ),
+  ];
 
-    if (content.description) {
-      content.description = `${content.description} - ${textContent}`;
-    } else {
-      content.description = textContent;
-    }
-  }
+  const resolvedLinks = await Promise.all(
+    links.map(async (link) => {
+      if (new URL(link).origin !== new URL(PyCoders.baseUrl).origin) {
+        return link;
+      }
+      return resolveUrl(link);
+    }),
+  );
 
-  if (!content.link) return null;
-
-  if (content.link.startsWith(PyCoders.baseUrl)) {
-    const finalUrl = await resolveUrl(content.link);
-    if (!finalUrl) return null;
-    content.link = finalUrl;
-  }
-
-  return content;
+  return resolvedLinks.flatMap((link) =>
+    defined(link) && new URL(link).origin !== new URL(PyCoders.baseUrl).origin
+      ? [{ description, link, isSponsored }]
+      : [],
+  );
 }
 
-const dateStringRegex = /\((?<date>.+?)\)$/i;
+const dateStringRegex =
+  /\b(?<date>\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})\b/i;
 function extractDate(str: string) {
   const groups = dateStringRegex.exec(str?.trim())?.groups;
   if (!groups?.date) throw new Error(`failed to extract date: "${str}"`);
 
+  const monthNames: Record<string, string> = {
+    jan: "January",
+    feb: "February",
+    mar: "March",
+    apr: "April",
+    jun: "June",
+    jul: "July",
+    aug: "August",
+    sep: "September",
+    sept: "September",
+    oct: "October",
+    nov: "November",
+    dec: "December",
+  };
   const dateStr = groups.date
-    .replace(/dec./i, "December")
-    .replace(/nov./i, "November")
-    .replace(/oct./i, "October")
-    .replace(/sept./i, "September")
-    .replace(/aug./i, "August")
-    .replace(/feb./i, "February")
-    .replace(/jan./i, "January")
+    .replace(/^([A-Za-z]+)\.?/, (month) => {
+      const normalized = month.toLowerCase().replace(/\.$/, "");
+      return monthNames[normalized] ?? month;
+    })
+    .replace(/(st|nd|rd|th)\b/i, "")
     .replace(",", "");
 
   const date = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
     ? new Date(`${dateStr}T00:00:00Z`)
-    : parse(dateStr, "MMMM dd yyyy", new Date(), { locale: enUS });
+    : parse(dateStr, "MMMM d yyyy", new Date(), { locale: enUS });
 
   if (!isValid(date)) throw new Error("failed to parse date");
   const dateFmt = formatISO(date, { representation: "date" });

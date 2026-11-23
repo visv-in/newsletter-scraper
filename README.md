@@ -29,7 +29,7 @@ pnpm scrape
 pnpm web
 ```
 
-The scraper updates the local database and writes the generated feed and newsletter issue index to `app/public/data.json` and `app/public/issues.json`; run `pnpm scrape` again whenever you want to refresh them. Then open the local URL printed by Astro. Saved issue URLs are skipped on later runs, and the scraper continues through the available issue listings. If a newsletter source is unavailable, successful sources are still exported and the scraper reports the source failures.
+The browser cannot read SQLite directly. The scraper exports the local database to `app/public/data.json`, `app/public/issues.json`, and `app/public/sponsors.json`; `pnpm web` refreshes those exports before starting Astro. Then open the local URL printed by Astro. `pnpm scrape` fetches new newsletter issues and updates the database. Run `pnpm refresh` to re-scrape every saved issue dated January 1, 2026 or later. Numbered newsletters keep a per-source issue-number checkpoint in SQLite and only fetch issues after it. If a newsletter source is unavailable, successful sources are still exported and the scraper reports the source failures.
 
 In the site's **From Newsletter** section, choose a source to see its extracted links in the feed, or choose an issue to narrow the feed to that issue.
 

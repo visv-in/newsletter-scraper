@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "node --import ./loader/index.js main.ts",
     "update": "node --import ./loader/index.js main.ts --update",
+    "refresh": "node --import ./loader/index.js main.ts --refresh",
+    "export": "node --import ./loader/index.js main.ts --export",
     "update-url": "node --import ./loader/index.js main.ts --update-url"
   },
   "dependencies": {

@@ -7,7 +7,7 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   integrations: [solidJs()],
   site: "https://carlosqsilva.github.io",
-  base: "/",
+  base: "/newsletter-scraper/",
   vite: {
     plugins: [tailwindcss()],
   },

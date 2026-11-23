@@ -2,7 +2,9 @@
   "name": "newslatter-scrapper",
   "scripts": {
     "scrape": "pnpm --filter scraper run update",
-    "web": "pnpm run --filter app dev",
+    "refresh": "pnpm --filter scraper run refresh",
+    "build": "pnpm --filter app build",
+    "web": "pnpm --filter scraper run export && pnpm --filter app run dev",
     "fmt": "biome format --write",
     "check": "biome check"
   },

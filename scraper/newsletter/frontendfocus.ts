@@ -35,16 +35,18 @@ export class FrontendFocus implements InfoExtractor {
     }
 
     const page = this.browser.newPage();
-    await page.goto(url);
+    try {
+      await page.goto(url);
 
-    console.log(`parsing: ${url}`);
-    const content = await extractContent(page, FrontendFocus.baseUrl);
-
-    if (Array.isArray(content) && content.length > 0) {
+      console.log(`parsing: ${url}`);
+      const content = await extractContent(page, FrontendFocus.baseUrl);
+      if (!Array.isArray(content) || content.length === 0) {
+        throw new Error(`No links extracted from issue: ${url}`);
+      }
       this.db.updateUrl(url, content);
+    } finally {
+      await page.close();
     }
-
-    page.close();
   }
 
   async update() {
@@ -52,16 +54,26 @@ export class FrontendFocus implements InfoExtractor {
 
     await page.goto(`${FrontendFocus.baseUrl}/issues`);
 
-    const issues = page.mainFrame.document.querySelectorAll("div.issue-card");
+    const issues = [
+      ...page.mainFrame.document.querySelectorAll("div.issue-card"),
+    ].flatMap((issue) => {
+      const url = issue.querySelector("a")?.href;
+      return url ? [{ url, date: extractContentDate(issue) }] : [];
+    });
+    const issueByUrl = new Map(issues.map(({ url, date }) => [url, date]));
 
-    for (const issue of issues) {
-      const url = issue?.querySelector("a")?.href;
-      if (!url) throw new Error("failed to extract url");
-      if (!url || this.db.isSaved(url)) continue;
+    for (const url of this.db.getNewIssueUrls(
+      "frontendfocus",
+      issues.map(({ url }) => url),
+    )) {
+      const date = issueByUrl.get(url);
+      if (!date) throw new Error(`failed to find issue listing for ${url}`);
 
       try {
-        const date = extractContentDate(issue);
-        if (!isIssueDateEligible(date)) continue;
+        if (!isIssueDateEligible(date)) {
+          this.db.markIssueNumberSeen("frontendfocus", url);
+          continue;
+        }
 
         await page.goto(url);
         console.log(`parsing: ${url}`);
@@ -69,13 +81,17 @@ export class FrontendFocus implements InfoExtractor {
         console.log(date);
 
         const content = await extractContent(page, FrontendFocus.baseUrl);
+        if (!Array.isArray(content) || content.length === 0) {
+          throw new Error(`No links extracted from issue: ${url}`);
+        }
         this.db.saveContent("frontendfocus", {
           url,
           date,
           content,
         });
       } catch (err) {
-        console.log(err);
+        console.error(err);
+        throw err;
       }
     }
 

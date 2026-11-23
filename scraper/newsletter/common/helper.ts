@@ -16,6 +16,9 @@ export function extractContentDate(content?: string) {
     ?.replace("Decemeber", "December")
     .replace("Febraury", "February");
 
+  const isoDate = /\b\d{4}-\d{2}-\d{2}\b/.exec(str)?.[0];
+  if (isoDate) return isoDate;
+
   const groups = dateReg.exec(str?.trim())?.groups;
   if (!groups) throw new Error(`failed to extract date: "${content}"`);
 
@@ -37,7 +40,7 @@ export interface InfoContent {
 
 export async function extractContent(page: BrowserPage, baseURL: string) {
   const content = page.mainFrame.document.querySelectorAll(
-    "table.el-item.item, table.content.el-md",
+    "table.el-item.item, table.miniitem.item, table.content.el-md",
   );
 
   let infoList: InfoContent[] = [];
@@ -54,13 +57,26 @@ export async function extractContent(page: BrowserPage, baseURL: string) {
   if (infoList.length === 0) return null;
 
   const promises = infoList.map(async (info) => {
-    if (!info.link.startsWith(baseURL)) return info;
-    const link = await resolveUrl(info.link);
-    if (!defined(link)) return info;
-    return { ...info, link };
+    let link = info.link;
+    const baseOrigin = new URL(baseURL).origin;
+    if (new URL(link).origin === baseOrigin) {
+      const resolvedLink = await resolveUrl(link);
+      if (!defined(resolvedLink)) return null;
+      link = new URL(resolvedLink, link).href;
+    }
+
+    const parsedLink = new URL(link);
+    if (
+      !["http:", "https:"].includes(parsedLink.protocol) ||
+      parsedLink.origin === baseOrigin
+    ) {
+      return null;
+    }
+
+    return { ...info, link: parsedLink.href };
   });
 
-  infoList = await Promise.all(promises);
+  infoList = (await Promise.all(promises)).filter(defined);
 
   console.log(`found ${content.length} items, extracted ${infoList.length}`);
 
@@ -70,7 +86,10 @@ export async function extractContent(page: BrowserPage, baseURL: string) {
 function parseContent(data: Element): InfoContent | InfoContent[] | null {
   const className = data?.className.trim();
 
-  if (className.startsWith("el-item item")) {
+  if (
+    className.startsWith("el-item item") ||
+    className.startsWith("miniitem item")
+  ) {
     return parseStandardInfo(data);
   }
 
@@ -81,48 +100,56 @@ function parseContent(data: Element): InfoContent | InfoContent[] | null {
   return null;
 }
 
-function parseStandardInfo(data: Element): InfoContent | null {
+function parseStandardInfo(data: Element): InfoContent[] | null {
   const content = data.querySelector("p.desc");
   const description = content?.textContent.trim();
   const author = data.querySelector("p.name")?.textContent.trim();
-  const link = (content?.querySelector("span a") as HTMLAnchorElement)?.href;
+  const isSponsored = /sponsor|presented by/i.test(author ?? "");
+  if (!content || !description) return null;
 
-  const isSponsored = author?.toLowerCase().endsWith("sponsor");
+  const contentList = [...content.querySelectorAll("a[href]")].flatMap(
+    (anchor) => {
+      const link = getAnchorUrl(anchor as HTMLAnchorElement);
+      return link
+        ? [{ author, isSponsored, description, link }]
+        : [];
+    },
+  );
 
-  if (!link || !description) return null;
-
-  return {
-    author,
-    isSponsored,
-    description,
-    link,
-  };
+  return contentList.length > 0 ? contentList : null;
 }
 
-const titleReg = /(brief|release)/i;
-
 function parseSmallInfo(data: Element): InfoContent[] | null {
-  const title = data.querySelector("p")?.textContent;
-  if (title && titleReg.test(title)) return null;
-
   const items = data.querySelectorAll("td > ul > li, td > p");
   const contentList = [];
 
   for (const item of items) {
-    const link = item.querySelector("a")?.href;
     const description = item?.textContent.trim();
+    const isSponsored = /sponsor|presented by/i.test(description);
 
-    if (!link || !description) continue;
+    for (const anchor of item.querySelectorAll("a[href]")) {
+      const link = getAnchorUrl(anchor as HTMLAnchorElement);
+      if (!link || !description) continue;
 
-    contentList.push({
-      link,
-      description,
-    });
+      contentList.push({ link, description, isSponsored });
+    }
   }
-
-  console.table(`extracted small items: ${contentList.length}`);
 
   if (contentList.length > 0) return contentList;
 
   return null;
+}
+
+function getAnchorUrl(anchor: HTMLAnchorElement) {
+  const href = anchor.getAttribute("href")?.trim();
+  if (!href || href.startsWith("#")) return null;
+
+  try {
+    const url = new URL(anchor.href);
+    return ["http:", "https:"].includes(url.protocol) && !url.hash
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
 }

@@ -5,7 +5,7 @@ import {
   BrowserNavigationCrossOriginPolicyEnum,
 } from "happy-dom";
 import { getURLInfo } from "./commands/info.ts";
-import { update } from "./commands/update.ts";
+import { refresh, update } from "./commands/update.ts";
 import { updateUrl } from "./commands/updateUrl.ts";
 import { Storage } from "./database.ts";
 import { defined } from "./utils.ts";
@@ -16,14 +16,24 @@ const { values } = parseArgs({
     update: {
       type: "boolean",
     },
+    refresh: {
+      type: "boolean",
+    },
     "update-url": {
       type: "string",
+    },
+    export: {
+      type: "boolean",
     },
     info: {
       type: "string",
     },
   },
 });
+
+if (values.update && values.refresh) {
+  throw new Error("Choose either --update or --refresh, not both.");
+}
 
 const storage = new Storage();
 
@@ -45,6 +55,14 @@ const browser = new Browser({
 
 if (values.update) {
   await update(browser, storage);
+}
+
+if (values.refresh) {
+  await refresh(browser, storage);
+}
+
+if (values.export) {
+  await storage.export();
 }
 
 if (values["update-url"]) {

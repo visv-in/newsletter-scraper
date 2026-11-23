@@ -26,6 +26,10 @@ interface NewsletterIssue {
   url: string;
 }
 
+interface SponsorLink extends FeedItem {
+  issueUrl: string;
+}
+
 interface NewsletterSelection {
   source: string;
   issueUrl?: string;
@@ -195,6 +199,14 @@ function isNewsletterIssue(value: unknown): value is NewsletterIssue {
   );
 }
 
+function isSponsorLink(value: unknown): value is SponsorLink {
+  return (
+    isFeedItem(value) &&
+    "issueUrl" in value &&
+    typeof value.issueUrl === "string"
+  );
+}
+
 function classifyItem(item: FeedItem): CategoryId[] {
   const text = `${item.description} ${item.url}`;
   return CATEGORIES.filter(
@@ -240,7 +252,7 @@ function matchesSelection(
 
 async function loadFeed(): Promise<CategorizedFeedItem[]> {
   const response = await fetch(
-    new URL("data.json", window.location.href),
+    new URL(`${import.meta.env.BASE_URL}data.json`, window.location.origin),
     { cache: "no-store" },
   );
   if (!response.ok) {
@@ -275,9 +287,10 @@ async function loadFeed(): Promise<CategorizedFeedItem[]> {
 }
 
 async function loadNewsletterIssues(): Promise<NewsletterIssue[]> {
-  const response = await fetch(new URL("issues.json", window.location.href), {
-    cache: "no-store",
-  });
+  const response = await fetch(
+    new URL(`${import.meta.env.BASE_URL}issues.json`, window.location.origin),
+    { cache: "no-store" },
+  );
   if (!response.ok) {
     throw new Error(
       `Could not load newsletter issues (HTTP ${response.status}).`,
@@ -300,6 +313,32 @@ async function loadNewsletterIssues(): Promise<NewsletterIssue[]> {
       return issue;
     })
     .filter((issue) => issue.date >= SCRAPE_START_DATE);
+}
+
+async function loadSponsorLinks(): Promise<SponsorLink[]> {
+  const response = await fetch(
+    new URL(`${import.meta.env.BASE_URL}sponsors.json`, window.location.origin),
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw new Error(`Could not load sponsor links (HTTP ${response.status}).`);
+  }
+
+  const data: unknown = await response.json();
+  if (!Array.isArray(data)) {
+    throw new Error("The sponsor links data has an invalid format.");
+  }
+
+  return data
+    .map((item: unknown, index) => {
+      if (!isSponsorLink(item)) {
+        throw new Error(`The sponsor links data has an invalid item at ${index}.`);
+      }
+
+      return item;
+    })
+    .filter((item) => item.date >= SCRAPE_START_DATE)
+    .sort((a, b) => b.date.localeCompare(a.date));
 }
 
 function getHostname(url: string) {
@@ -345,43 +384,51 @@ export function Feed() {
   const [selectedDomainTopic, setSelectedDomainTopic] =
     createSignal<DomainTopicId | null>(null);
   const [selectedDomain, setSelectedDomain] = createSignal<string | null>(null);
+  const [showSponsors, setShowSponsors] = createSignal(false);
   const [selectedNewsletter, setSelectedNewsletter] =
     createSignal<NewsletterSelection | null>(null);
   const [items, { refetch }] = createResource(loadFeed);
   const [newsletterIssues, { refetch: refetchNewsletterIssues }] =
     createResource(loadNewsletterIssues);
+  const [sponsorLinks, { refetch: refetchSponsorLinks }] =
+    createResource(loadSponsorLinks);
 
   const sortedItems = createMemo(() =>
     [...(items() ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
   );
+  const newsletterItems = createMemo(() => {
+    const newsletter = selectedNewsletter();
+    if (!newsletter) return sortedItems();
+
+    return sortedItems().filter((item) => {
+      if (item.source !== newsletter.source) return false;
+      if (!newsletter.issueUrl) return true;
+      return item.issueUrl
+        ? item.issueUrl === newsletter.issueUrl
+        : item.date === newsletter.date;
+    });
+  });
   const visibleItems = createMemo(() => {
     const domain = selectedDomain();
     if (domain) {
-      return sortedItems().filter((item) => getHostname(item.url) === domain);
-    }
-
-    const newsletter = selectedNewsletter();
-    if (newsletter) {
-      return sortedItems().filter((item) => {
-        if (item.source !== newsletter.source) return false;
-        if (!newsletter.issueUrl) return true;
-        return item.issueUrl
-          ? item.issueUrl === newsletter.issueUrl
-          : item.date === newsletter.date;
-      });
+      return newsletterItems().filter(
+        (item) => getHostname(item.url) === domain,
+      );
     }
 
     const category = selectedCategory();
-    return sortedItems().filter((item) => matchesSelection(item, category));
+    return newsletterItems().filter((item) =>
+      matchesSelection(item, category),
+    );
   });
   const countFor = (category: SelectedCategory) =>
     sortedItems().filter((item) => matchesSelection(item, category)).length;
   const countForDomain = (domain: string) =>
-    sortedItems().filter((item) => getHostname(item.url) === domain).length;
+    newsletterItems().filter((item) => getHostname(item.url) === domain).length;
   const domainsForTopic = (topic: DomainTopicId) =>
     [
       ...new Set(
-        sortedItems()
+        newsletterItems()
           .filter((item) => item.categories.includes(topic))
           .map((item) => getHostname(item.url))
           .filter((domain): domain is string => domain !== null),
@@ -390,6 +437,10 @@ export function Feed() {
   const countForDomainTopic = (topic: DomainTopicId) =>
     domainsForTopic(topic).length;
   const resultsCount = () => {
+    if (showSponsors()) {
+      return `${(sponsorLinks() ?? []).length.toLocaleString()} sponsor links`;
+    }
+
     const topic = selectedDomainTopic();
     return topic
       ? `${countForDomainTopic(topic).toLocaleString()} unique domains`
@@ -399,30 +450,41 @@ export function Feed() {
     setSelectedCategory(category);
     setSelectedDomainTopic(null);
     setSelectedDomain(null);
+    setShowSponsors(false);
     setSelectedNewsletter(null);
   };
   const selectDomainTopic = (topic: DomainTopicId) => {
     setSelectedCategory("all");
     setSelectedDomainTopic(topic);
     setSelectedDomain(null);
-    setSelectedNewsletter(null);
+    setShowSponsors(false);
   };
   const selectDomain = (domain: string) => {
     setSelectedCategory("all");
     setSelectedDomainTopic(null);
     setSelectedDomain(domain);
+    setShowSponsors(false);
+  };
+  const selectSponsors = () => {
+    setSelectedCategory("all");
+    setSelectedDomainTopic(null);
+    setSelectedDomain(null);
+    setShowSponsors(true);
     setSelectedNewsletter(null);
   };
   const selectNewsletter = (source: string, issue?: NewsletterIssue) => {
     setSelectedCategory("all");
     setSelectedDomainTopic(null);
     setSelectedDomain(null);
+    setShowSponsors(false);
     setSelectedNewsletter({
       source,
       ...(issue ? { issueUrl: issue.url, date: issue.date } : {}),
     });
   };
   const heading = () => {
+    if (showSponsors()) return "Sponsors";
+
     const domain = selectedDomain();
     if (domain) return `${domain} links`;
 
@@ -469,7 +531,12 @@ export function Feed() {
             selected={selectedNewsletter}
             onSelectNewsletter={selectNewsletter}
           />
-          <p class="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+          <DomainTopicNavigation
+            selected={selectedDomainTopic}
+            onSelect={selectDomainTopic}
+            countFor={countForDomainTopic}
+          />
+          <p class="mb-3 mt-6 border-t border-border px-3 pt-5 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
             Browse topics
           </p>
           <CategoryNavigation
@@ -477,10 +544,13 @@ export function Feed() {
             onSelect={selectCategory}
             countFor={countFor}
           />
-          <DomainTopicNavigation
-            selected={selectedDomainTopic}
-            onSelect={selectDomainTopic}
-            countFor={countForDomainTopic}
+          <SponsorNavigation
+            count={sponsorLinks()?.length ?? 0}
+            loading={sponsorLinks.loading}
+            error={sponsorLinks.error}
+            onRetry={() => refetchSponsorLinks()}
+            selected={showSponsors}
+            onSelect={selectSponsors}
           />
           <OtherNewsletterNavigation />
         </aside>
@@ -496,11 +566,26 @@ export function Feed() {
               selected={selectedNewsletter}
               onSelectNewsletter={selectNewsletter}
             />
+            <DomainTopicNavigation
+              compact
+              selected={selectedDomainTopic}
+              onSelect={selectDomainTopic}
+              countFor={countForDomainTopic}
+            />
             <CategoryNavigation
               compact
               selected={selectedCategory}
               onSelect={selectCategory}
               countFor={countFor}
+            />
+            <SponsorNavigation
+              compact
+              count={sponsorLinks()?.length ?? 0}
+              loading={sponsorLinks.loading}
+              error={sponsorLinks.error}
+              onRetry={() => refetchSponsorLinks()}
+              selected={showSponsors}
+              onSelect={selectSponsors}
             />
             <OtherNewsletterNavigation compact />
           </div>
@@ -516,60 +601,89 @@ export function Feed() {
                 </p>
               </div>
 
-              <Show when={items.loading}>
-                <p class="py-12 text-center text-fg-muted" role="status">
-                  Loading curated links…
-                </p>
-              </Show>
+              <Show
+                when={showSponsors()}
+                fallback={
+                  <>
+                    <Show when={items.loading}>
+                      <p class="py-12 text-center text-fg-muted" role="status">
+                        Loading curated links…
+                      </p>
+                    </Show>
 
-              <Show when={items.error}>
-                <div
-                  class="rounded-xl border border-border bg-surface p-6 text-center"
-                  role="alert"
-                >
-                  <p class="font-medium">Could not load the link feed.</p>
-                  <p class="mt-2 text-sm text-fg-subtle">
-                    {items.error instanceof Error
-                      ? items.error.message
-                      : "An unexpected error occurred."}
-                  </p>
-                  <button
-                    type="button"
-                    class="mt-4 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-canvas"
-                    onClick={() => refetch()}
-                  >
-                    Try again
-                  </button>
-                </div>
-              </Show>
-
-              <Show when={!items.loading && !items.error}>
-                <Show
-                  when={selectedDomainTopic()}
-                  fallback={
-                    <Show
-                      when={visibleItems().length > 0}
-                      fallback={
-                        <p class="py-12 text-center text-fg-muted">
-                          No links found for this selection yet.
+                    <Show when={items.error}>
+                      <div
+                        class="rounded-xl border border-border bg-surface p-6 text-center"
+                        role="alert"
+                      >
+                        <p class="font-medium">Could not load the link feed.</p>
+                        <p class="mt-2 text-sm text-fg-subtle">
+                          {items.error instanceof Error
+                            ? items.error.message
+                            : "An unexpected error occurred."}
                         </p>
-                      }
-                    >
-                      <div class="space-y-4">
-                        <For each={visibleItems()}>
-                          {(item) => <FeedCard item={item} />}
-                        </For>
+                        <button
+                          type="button"
+                          class="mt-4 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-canvas"
+                          onClick={() => refetch()}
+                        >
+                          Try again
+                        </button>
                       </div>
                     </Show>
+
+                    <Show when={!items.loading && !items.error}>
+                      <Show
+                        when={selectedDomainTopic()}
+                        fallback={
+                          <Show
+                            when={visibleItems().length > 0}
+                            fallback={
+                              <p class="py-12 text-center text-fg-muted">
+                                No links found for this selection yet.
+                              </p>
+                            }
+                          >
+                            <div class="space-y-4">
+                              <For each={visibleItems()}>
+                                {(item) => <FeedCard item={item} />}
+                              </For>
+                            </div>
+                          </Show>
+                        }
+                      >
+                        {(topic) => (
+                          <DomainList
+                            domains={domainsForTopic(topic())}
+                            onSelect={selectDomain}
+                            countFor={countForDomain}
+                          />
+                        )}
+                      </Show>
+                    </Show>
+                  </>
+                }
+              >
+                <Show
+                  when={!sponsorLinks.loading && !sponsorLinks.error}
+                  fallback={
+                    <div class="py-12 text-center text-fg-muted" role="status">
+                      {sponsorLinks.error instanceof Error
+                        ? sponsorLinks.error.message
+                        : "Loading sponsor links…"}
+                      <Show when={sponsorLinks.error}>
+                        <button
+                          type="button"
+                          class="ml-2 text-link"
+                          onClick={() => refetchSponsorLinks()}
+                        >
+                          Try again
+                        </button>
+                      </Show>
+                    </div>
                   }
                 >
-                  {(topic) => (
-                    <DomainList
-                      domains={domainsForTopic(topic())}
-                      onSelect={selectDomain}
-                      countFor={countForDomain}
-                    />
-                  )}
+                  <SponsorList sponsors={sponsorLinks() ?? []} />
                 </Show>
               </Show>
             </div>
@@ -796,16 +910,29 @@ function CategoryNavigation(props: {
 }
 
 function DomainTopicNavigation(props: {
+  compact?: boolean;
   selected: () => DomainTopicId | null;
   onSelect: (topic: DomainTopicId) => void;
   countFor: (topic: DomainTopicId) => number;
 }) {
   return (
-    <section class="mt-6 border-t border-border pt-5">
+    <section
+      class={
+        props.compact
+          ? "mt-3 border-t border-border pt-3"
+          : "mt-6 border-t border-border pt-5"
+      }
+    >
       <h2 class="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
         Domains
       </h2>
-      <div class="flex flex-col gap-3">
+      <div
+        class={
+          props.compact
+            ? "flex gap-2 overflow-x-auto"
+            : "flex flex-col gap-3"
+        }
+      >
         <For each={DOMAIN_TOPICS}>
           {(topic) => {
             return (
@@ -824,6 +951,50 @@ function DomainTopicNavigation(props: {
           }}
         </For>
       </div>
+    </section>
+  );
+}
+
+function SponsorNavigation(props: {
+  compact?: boolean;
+  count: number;
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+  selected: () => boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <section
+      class={
+        props.compact
+          ? "mt-3 border-t border-border pt-3"
+          : "mt-6 border-t border-border pt-5"
+      }
+    >
+      <button
+        type="button"
+        aria-pressed={props.selected()}
+        class="flex w-full items-center justify-between gap-5 rounded-lg px-3 py-2 text-left text-sm text-fg-muted transition-colors aria-pressed:bg-surface aria-pressed:font-semibold aria-pressed:text-fg hover:bg-surface"
+        onClick={props.onSelect}
+      >
+        <span>Sponsors</span>
+        <span class="text-xs text-fg-subtle">
+          {props.loading ? "…" : props.count.toLocaleString()}
+        </span>
+      </button>
+      <Show when={props.error}>
+        <div class="px-3 py-2 text-sm text-fg-subtle" role="alert">
+          <p>
+            {props.error instanceof Error
+              ? props.error.message
+              : "Could not load sponsor links."}
+          </p>
+          <button type="button" class="mt-1 text-link" onClick={props.onRetry}>
+            Try again
+          </button>
+        </div>
+      </Show>
     </section>
   );
 }
@@ -862,7 +1033,66 @@ function DomainList(props: {
   );
 }
 
-function FeedCard(props: { item: CategorizedFeedItem }) {
+function SponsorList(props: { sponsors: SponsorLink[] }) {
+  const sponsorsByDomain = createMemo(() => {
+    const domains = new Map<
+      string,
+      { domain: string; url: string; count: number }
+    >();
+    for (const sponsor of props.sponsors) {
+      const domain = getHostname(sponsor.url);
+      if (!domain) continue;
+
+      const existing = domains.get(domain);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        domains.set(domain, {
+          domain,
+          url: new URL(sponsor.url).origin,
+          count: 1,
+        });
+      }
+    }
+
+    return [...domains.values()].sort((a, b) =>
+      a.domain.localeCompare(b.domain),
+    );
+  });
+
+  return (
+    <Show
+      when={sponsorsByDomain().length > 0}
+      fallback={
+        <p class="py-12 text-center text-fg-muted">
+          No sponsor domains found.
+        </p>
+      }
+    >
+      <div class="grid gap-3 sm:grid-cols-2">
+        <For each={sponsorsByDomain()}>
+          {(sponsor) => (
+            <a
+              href={sponsor.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="flex items-center justify-between gap-3 rounded-xl border border-border bg-canvas p-4 transition-colors hover:bg-surface"
+            >
+              <span class="truncate font-medium">{sponsor.domain}</span>
+              <span class="flex-none text-xs text-fg-subtle">
+                {sponsor.count.toLocaleString()} links
+              </span>
+            </a>
+          )}
+        </For>
+      </div>
+    </Show>
+  );
+}
+
+function FeedCard(props: {
+  item: FeedItem & { categories?: CategoryId[] };
+}) {
   return (
     <a
       href={props.item.url}
@@ -875,7 +1105,7 @@ function FeedCard(props: { item: CategorizedFeedItem }) {
           class="flex size-10 flex-none items-center justify-center rounded-full bg-surface text-xs font-bold uppercase text-fg-muted"
           aria-hidden="true"
         >
-          {props.item.categories[0]
+          {props.item.categories?.[0]
             ? CATEGORY_LABELS.get(props.item.categories[0])
             : "↗"}
         </div>
@@ -895,7 +1125,7 @@ function FeedCard(props: { item: CategorizedFeedItem }) {
           </h2>
 
           <div class="mt-4 flex flex-wrap items-center gap-2">
-            <For each={props.item.categories}>
+            <For each={props.item.categories ?? []}>
               {(category) => (
                 <span class="rounded-full bg-surface px-2.5 py-1 text-xs font-medium text-fg-muted">
                   {CATEGORY_LABELS.get(category)}

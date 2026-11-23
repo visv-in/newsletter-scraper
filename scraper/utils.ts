@@ -6,6 +6,18 @@ export function isIssueDateEligible(date: string) {
   return date >= SCRAPE_START_DATE;
 }
 
+export function getIssueNumber(url: string) {
+  try {
+    const match = new URL(url).pathname.match(/\/issues\/(\d+)\/?$/);
+    if (!match) return null;
+
+    const issueNumber = Number(match[1]);
+    return Number.isSafeInteger(issueNumber) ? issueNumber : null;
+  } catch {
+    return null;
+  }
+}
+
 export function normalizeUrl(url: string) {
   try {
     const normalized = new URL(url);
@@ -87,8 +99,11 @@ export async function resolveUrl(url: string) {
       headersTimeout: 8_000,
     });
 
-    if (statusCode < 404 && headers.location && headers.location !== url) {
-      return headers.location as string;
+    const location = Array.isArray(headers.location)
+      ? headers.location[0]
+      : headers.location;
+    if (statusCode < 404 && location && location !== url) {
+      return new URL(location, url).href;
     }
 
     return null;

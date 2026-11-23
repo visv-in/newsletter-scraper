@@ -55,7 +55,10 @@ export class AINewsletterExtractor implements InfoExtractor {
       await page.goto(url);
       console.log(`parsing: ${url}`);
       const content = extractIssueContent(page, this.config.baseUrl);
-      if (content.length > 0) this.db.updateUrl(url, content);
+      if (content.length === 0) {
+        throw new Error(`No links extracted from issue: ${url}`);
+      }
+      this.db.updateUrl(url, content);
     } finally {
       await page.close();
     }
@@ -89,10 +92,56 @@ export class AINewsletterExtractor implements InfoExtractor {
 
           console.log(`parsing: ${url}`);
           const content = extractIssueContent(page, this.config.baseUrl);
+          if (content.length === 0) {
+            throw new Error(`No links extracted from issue: ${url}`);
+          }
           this.db.saveContent(this.config.source, { url, date, content });
         } catch (error) {
           console.error(error);
+          throw error;
         }
+      }
+
+      const latestDate = [...issueUrls]
+        .map((url) => new URL(url).pathname.split("/").at(-1) ?? "")
+        .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
+        .sort()
+        .at(-1);
+      if (!latestDate) {
+        throw new Error(`No dated issues found at ${this.config.archiveUrl}`);
+      }
+
+      const dateCursor = new Date(`${SCRAPE_START_DATE}T00:00:00.000Z`);
+
+      while (dateCursor.toISOString().slice(0, 10) < latestDate) {
+        const date = dateCursor.toISOString().slice(0, 10);
+        dateCursor.setUTCDate(dateCursor.getUTCDate() + 1);
+        if ([0, 6].includes(new Date(`${date}T00:00:00.000Z`).getUTCDay())) {
+          continue;
+        }
+
+        const url = `${this.config.baseUrl}/ai/${date}`;
+        if (this.db.isSaved(url)) continue;
+
+        await page.goto(url);
+        const pageUrl = new URL(page.mainFrame.document.location.href);
+        if (pageUrl.pathname !== `/ai/${date}`) continue;
+
+        const issueDate = extractIssueDate(page);
+        if (issueDate !== date) {
+          throw new Error(`Issue date mismatch for ${url}: found ${issueDate}`);
+        }
+
+        console.log(`backfilling: ${url}`);
+        const content = extractIssueContent(page, this.config.baseUrl);
+        if (content.length === 0) {
+          throw new Error(`No links extracted from issue: ${url}`);
+        }
+        this.db.saveContent(this.config.source, {
+          url,
+          date,
+          content,
+        });
       }
     } finally {
       await page.close();
@@ -154,39 +203,48 @@ function extractIssueDate(page: BrowserPage) {
 }
 
 function extractIssueContent(page: BrowserPage, baseUrl: string): InfoContent[] {
-  const contentRoot =
-    page.mainFrame.document.querySelector("article, main, [role=main]") ??
-    page.mainFrame.document.body;
+  const document = page.mainFrame.document;
+  const articles = [...document.querySelectorAll("article")];
+  const contentRoots =
+    articles.length > 0
+      ? articles
+      : [document.querySelector("main, [role=main]") ?? document.body];
   const content: InfoContent[] = [];
 
-  for (const anchor of contentRoot.querySelectorAll("a[href]")) {
-    const href = anchor.getAttribute("href");
-    if (!href) continue;
+  for (const contentRoot of contentRoots) {
+    for (const anchor of contentRoot.querySelectorAll("a[href]")) {
+      const href = anchor.getAttribute("href");
+      if (!href) continue;
 
-    let url: URL;
-    try {
-      url = new URL(href, baseUrl);
-    } catch {
-      continue;
+      let url: URL;
+      try {
+        url = new URL(href, baseUrl);
+      } catch {
+        continue;
+      }
+
+      if (
+        !["http:", "https:"].includes(url.protocol) ||
+        url.origin === new URL(baseUrl).origin
+      ) {
+        continue;
+      }
+
+      const linkDescription =
+        anchor.closest("p, li, h2, h3")?.textContent.trim() ??
+        anchor.textContent.trim();
+      const description =
+        linkDescription.length >= 12
+          ? linkDescription
+          : (anchor.closest("article")?.textContent.trim() ?? linkDescription);
+      if (description.length < 12) continue;
+
+      content.push({
+        link: url.href,
+        description,
+        isSponsored: isSponsored(anchor),
+      });
     }
-
-    if (
-      !["http:", "https:"].includes(url.protocol) ||
-      url.origin === new URL(baseUrl).origin
-    ) {
-      continue;
-    }
-
-    const description =
-      anchor.closest("p, li, h2, h3")?.textContent.trim() ??
-      anchor.textContent.trim();
-    if (description.length < 12) continue;
-
-    content.push({
-      link: url.href,
-      description,
-      isSponsored: isSponsored(anchor),
-    });
   }
 
   return content;
@@ -194,6 +252,8 @@ function extractIssueContent(page: BrowserPage, baseUrl: string): InfoContent[] 
 
 function isSponsored(anchor: Element) {
   const context =
-    anchor.closest("p, li, h2, h3, h4")?.textContent.toLowerCase() ?? "";
+    anchor.closest("article")?.textContent.toLowerCase() ??
+    anchor.closest("p, li, h2, h3, h4")?.textContent.toLowerCase() ??
+    "";
   return /sponsor|presented by/.test(context);
 }
